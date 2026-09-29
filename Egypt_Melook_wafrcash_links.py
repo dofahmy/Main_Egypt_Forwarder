@@ -1772,7 +1772,7 @@ def _shot_and_price_sync(asin, smid=None):
                     font-family: 'Noto Sans Arabic', sans-serif !important;
                     letter-spacing: normal !important;
                 }
-                #productTitle { font-size: 26px !important; line-height: 1.6 !important; }
+
             """)
             page.evaluate("() => document.fonts.ready")
             try:
@@ -1792,8 +1792,8 @@ def _shot_and_price_sync(asin, smid=None):
                         pass
                 return None
 
-            img_box = _box(["#imgTagWrapperId", "#main-image-container",
-                            "#imageBlock", "#leftCol", "#altImages"])
+            img_box = _box(["#imageBlock", "#leftCol", "#imgTagWrapperId",
+                            "#main-image-container", "#altImages"])
             center_box = _box(["#centerCol", "#title_feature_div", "#productTitle"])
             price_box = _box(["#corePriceDisplay_desktop_feature_div span.a-price",
                               "#corePrice_feature_div span.a-price",
@@ -1801,6 +1801,7 @@ def _shot_and_price_sync(asin, smid=None):
                               "span.priceToPay",
                               "#corePriceDisplay_desktop_feature_div",
                               "#corePrice_feature_div"])
+            buy_box = _box(["#desktop_buybox", "#buybox", "#rightCol"])
             # نسبة الخصم (زي "خصم 28%") — بتكون جنب السعر، نضمّها للمربع
             pct_box = _box([".savingsPercentage",
                             "#corePriceDisplay_desktop_feature_div .savingsPercentage",
@@ -1845,17 +1846,20 @@ def _shot_and_price_sync(asin, smid=None):
                                        type="png")
                 return shot, None, page_price
 
-            top = max(0, img_box["y"] - 12)
+            layout_boxes = [b for b in (img_box, center_box, buy_box, price_box) if b]
+            top = max(0, min(b["y"] for b in layout_boxes) - 12)
             # الطول: لحد أبعد نقطة (صورة المنتج أو السعر + مساحة تحته للمشطوب)
             bottoms = [img_box["y"] + img_box["height"] + 15]
             if price_box:
                 bottoms.append(price_box["y"] + price_box["height"] + int(price_box["height"] * 0.9) + 15)
-            bottom = max(bottoms)
-            boxes = [b for b in (img_box, center_box, price_box) if b]
+            if buy_box:
+                bottoms.append(min(buy_box["y"] + buy_box["height"] + 12, top + 1000))
+            bottom = min(max(bottoms), top + 1000)
+            boxes = layout_boxes
             left = max(0, min(b["x"] for b in boxes) - 12)
             right = min(1280, max(b["x"] + b["width"] for b in boxes) + 12)
             h = bottom - top
-            print(f"   ✂️ القص: {right-left:.0f}×{h:.0f}px")
+            print(f"   ✂️ قص الأعمدة الثلاثة: {right-left:.0f}×{h:.0f}px; مربع الشراء={bool(buy_box)}")
             shot = page.screenshot(
                 clip={"x": left, "y": top, "width": right - left, "height": h},
                 type="png")
