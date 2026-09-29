@@ -2648,7 +2648,7 @@ def _resolve_with_browser(url):
             try:
                 print(f"   🌐 بجرب {name}...")
                 engine = pw.firefox if spec["engine"] == "firefox" else pw.chromium
-                launch_args = {"headless": False}
+                launch_args = {"headless": RAILWAY_MODE}
                 if spec.get("channel"):
                     launch_args["channel"] = spec["channel"]
                 if spec.get("executable"):
