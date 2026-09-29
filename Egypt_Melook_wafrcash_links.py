@@ -30,6 +30,10 @@ from concurrent.futures import ThreadPoolExecutor
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from egypt_offer_shortener import shorten_amazon_links
+_APP_DIR = Path(__file__).resolve().parent
+_STATE_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or os.getenv("STATE_DIR") or str(_APP_DIR))
+_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # curl_cffi: HTTP client that can impersonate a real Chrome TLS/browser fingerprint.
 try:
@@ -1716,7 +1720,7 @@ def _shot_and_price_sync(asin, smid=None):
         pw = ctx = None
         try:
             pw = sync_playwright().start()
-            kwargs = dict(viewport={"width": 1280, "height": 1100}, locale="ar-EG",
+            kwargs = dict(viewport={"width": 1280, "height": 1100}, device_scale_factor=2, locale="ar-EG",
                           args=["--lang=ar-EG"], ignore_default_args=["--disable-extensions"])
             if use_chrome:
                 kwargs["channel"] = "chrome"; kwargs["headless"] = False
@@ -1753,11 +1757,26 @@ def _shot_and_price_sync(asin, smid=None):
             except Exception:
                 pass
 
-            # نصغّر الصفحة كلها (zoom out) قبل السكرين شوت — 0.67 = 67%
-            ZOOM = 0.67
+            # Capture at full layout size and double pixel density.
+            ZOOM = 1.0
             try:
                 page.evaluate(f"document.body.style.zoom = '{ZOOM}'")
                 time.sleep(1)
+            except Exception:
+                pass
+
+            page.add_style_tag(content="""
+                body { font-family: 'Noto Sans Arabic', sans-serif !important; }
+                #productTitle, #centerCol p, #centerCol li, #centerCol h1,
+                #centerCol h2, #centerCol span:not(.a-icon) {
+                    font-family: 'Noto Sans Arabic', sans-serif !important;
+                    letter-spacing: normal !important;
+                }
+                #productTitle { font-size: 26px !important; line-height: 1.6 !important; }
+            """)
+            page.evaluate("() => document.fonts.ready")
+            try:
+                page.wait_for_function("() => { const i = document.querySelector('#landingImage, #imgBlkFront'); return !i || (i.complete && i.naturalWidth > 0); }", timeout=10000)
             except Exception:
                 pass
 
@@ -1823,7 +1842,7 @@ def _shot_and_price_sync(asin, smid=None):
 
             if not img_box:
                 shot = page.screenshot(clip={"x": 0, "y": 0, "width": 1280, "height": 900},
-                                       type="jpeg", quality=88)
+                                       type="png")
                 return shot, None, page_price
 
             top = max(0, img_box["y"] - 12)
@@ -1839,19 +1858,19 @@ def _shot_and_price_sync(asin, smid=None):
             print(f"   ✂️ القص: {right-left:.0f}×{h:.0f}px")
             shot = page.screenshot(
                 clip={"x": left, "y": top, "width": right - left, "height": h},
-                type="jpeg", quality=90)
+                type="png")
 
             rel_price = None
             if price_box:
                 rel_price = {
-                    "x": price_box["x"] - left,
-                    "y": price_box["y"] - top,
-                    "w": price_box["width"],
-                    "h": price_box["height"],
+                    "x": (price_box["x"] - left) * 2,
+                    "y": (price_box["y"] - top) * 2,
+                    "w": price_box["width"] * 2,
+                    "h": price_box["height"] * 2,
                 }
                 # يمين العنوان (بداية العنوان في RTL) — عشان الحد اليمين للفريم يتحاذى معاها
                 if center_box:
-                    rel_price["title_right"] = (center_box["x"] + center_box["width"]) - left
+                    rel_price["title_right"] = ((center_box["x"] + center_box["width"]) - left) * 2
             return shot, rel_price, page_price
         except Exception as e:
             if not use_chrome:
@@ -2375,7 +2394,7 @@ async def get_page_screenshot(url):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_EXECUTOR, _screenshot_sync, url, True, True)
 # ============ منع التكرار (بالوقت — 8 ساعات) ============
-SENT_TODAY_FILE = os.path.join(os.getenv("STATE_DIR", "."), "forwarder_eg_sent_today.json")
+SENT_TODAY_FILE = os.path.join(str(_STATE_DIR), "forwarder_eg_sent_today.json")
 DEDUP_HOURS = 8   # نفس المنتج مايتبعتش تاني على نفس القناة إلا بعد كام ساعة
 def _now_ts():
     return time.time()
@@ -2395,14 +2414,16 @@ def load_sent_today():
         return {}
 def save_sent_today(sent):
     try:
-        with open(SENT_TODAY_FILE, "w", encoding="utf-8") as f:
+        temp_path = SENT_TODAY_FILE + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump({"sent": sent}, f, ensure_ascii=False)
+        os.replace(temp_path, SENT_TODAY_FILE)
     except Exception as e:
         print(f"   ⚠️ مقدرتش أحفظ: {e}")
 
 # ---- سجل بوتات الأسعار (السعر الثابت + نزول السعر) ----
 # نشيك عليه عشان مانبعتش منتج اتبعت من خلالهم آخر 48 ساعة
-PRICE_BOTS_SENT_FILE = os.path.join(os.getenv("STATE_DIR", "."), "price_drop_sent.json")   # سجل price_stable_discount + price_drop
+PRICE_BOTS_SENT_FILE = os.path.join(str(_STATE_DIR), "price_drop_sent.json")   # سجل price_stable_discount + price_drop
 PRICE_BOTS_DEDUP_HOURS = 12
 def load_price_bots_sent():
     """يرجّع set بالـ ASINs اللي بوتات الأسعار بعتها خلال آخر 48 ساعة"""
@@ -3701,7 +3722,7 @@ SUBST_TO_ORIGINAL = {}    # {"@NewChannel": "@OriginalChannel"} — نعامل �
 # أول 4 قنوات — دول اللي البوت يسأل عنهم السؤال الموسّع (انقل/بديلة/تجاهل)
 FIRST_FOUR = ["@AmazonEgyptOffers", "@Belnos", "@EGFastAmzn", "@Yo_Ayman"]
 
-STARTUP_SETTINGS_FILE = os.path.join(os.getenv("STATE_DIR", "."), "forwarder_startup_settings.json")
+STARTUP_SETTINGS_FILE = os.path.join(str(_STATE_DIR), "forwarder_startup_settings.json")
 
 
 def _save_startup_settings():
@@ -3723,7 +3744,11 @@ def _load_startup_settings():
     """يرجع True لو لقى اختيارات محفوظة وطبّقها؛ بالتالي لا يسأل من جديد."""
     global ACTIVE_SOURCES, SUBSTITUTE_SOURCES, SUBST_TO_ORIGINAL, MIRROR_HUNTER_TO_MELOOK
     if not os.path.exists(STARTUP_SETTINGS_FILE):
-        return False
+        packaged_settings = _APP_DIR / "forwarder_startup_settings.json"
+        if packaged_settings.is_file() and str(packaged_settings) != STARTUP_SETTINGS_FILE:
+            shutil.copyfile(packaged_settings, STARTUP_SETTINGS_FILE)
+        else:
+            return False
     try:
         with open(STARTUP_SETTINGS_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -3748,7 +3773,7 @@ def _load_startup_settings():
         MIRROR_HUNTER_TO_MELOOK = bool(d.get("mirror_hunter_to_melook", False))
         if not ACTIVE_SOURCES:
             return False
-        print(f"   ♻️ حمّلت اختيارات التشغيل المحفوظة تلقائياً ({len(ACTIVE_SOURCES)} قناة)")
+        print(f"   ♻️ إعدادات التشغيل: {STARTUP_SETTINGS_FILE}; المصادر={len(ACTIVE_SOURCES)}; Hunter mirror={MIRROR_HUNTER_TO_MELOOK}")
         if SUBSTITUTE_SOURCES:
             print(f"   🔀 القنوات البديلة المحفوظة: {', '.join(SUBSTITUTE_SOURCES.keys())}")
         return True
@@ -3895,8 +3920,11 @@ async def _mirror_to_melook_hala(built_text, shot, msg):
         return
     global SENT_TODAY
     SENT_TODAY = load_sent_today()
-    dedup_key = f"hunter2melook:{msg.id}"
+    product_ids = sorted(set(re.findall(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", _html.unescape(built_text), re.I)))
+    identity = "|".join(a.upper() for a in product_ids) or f"{getattr(msg, 'chat_id', 'unknown')}:{msg.id}"
+    dedup_key = f"hunter2melook:{identity}"
     if dedup_key in SENT_TODAY:
+        print(f"   🔁 Hunter mirror: {identity} اتنقل خلال آخر {DEDUP_HOURS} ساعات — اتخطّى")
         return
     # نختار قناة واحدة بالقرعة العشوائية
     import random
@@ -3920,8 +3948,10 @@ async def _mirror_to_melook_hala(built_text, shot, msg):
         else:
             await client.send_message(chan, chan_text, parse_mode=pm)
         print(f"   ✅ اتنقل لـ {chan} (تاج {chan_tag})")
-        SENT_TODAY[dedup_key] = _now_ts()
-        save_sent_today(SENT_TODAY)
+        current_sent = load_sent_today()
+        current_sent[dedup_key] = _now_ts()
+        SENT_TODAY = current_sent
+        save_sent_today(current_sent)
     except Exception as e:
         print(f"   ❌ خطأ في النقل لـ {chan}: {e}")
 
@@ -3970,7 +4000,9 @@ def _restyle_for_channel(text, chan):
 
 def _run_forever():
     import time as _t
-    os.makedirs(os.getenv("STATE_DIR", "."), exist_ok=True)
+    print(f"📁 سجل منع التكرار: {SENT_TODAY_FILE}")
+    if os.getenv("RAILWAY_MODE") == "1" and not os.getenv("RAILWAY_VOLUME_MOUNT_PATH"):
+        print("⚠️ لا يوجد Railway Volume معلن؛ سجل التكرار قد يضيع عند نشر نسخة جديدة")
     _print_banner()
     if not _load_startup_settings():
         if RAILWAY_MODE:
