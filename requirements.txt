@@ -1,0 +1,9 @@
+telethon>=1.36,<2
+playwright==1.55.0
+requests>=2.31,<3
+Pillow>=10,<13
+curl_cffi>=0.7,<1
+arabic-reshaper>=3,<4
+python-bidi>=0.6,<1
+dnspython>=2,<3
+truststore>=0.9,<1
