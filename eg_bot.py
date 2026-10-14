@@ -130,7 +130,7 @@ def _scrape_product_page(asin):
               };
             }""")
             if result.get('robots') or not result.get('title') or not result.get('price'):
-                print(f"   ⚠️ صفحة {asin}: السعر/العنوان غير متاح أو يوجد CAPTCHA")
+                print(f"   ⚠️ صفحة {asin}: السعر/العنوان غير متاح أو يوجد CAPTCHA (title={bool(result.get('title'))}, price={bool(result.get('price'))}, captcha={bool(result.get('robots'))})", flush=True)
                 continue
             cur = _page_money(result['price'])
             orig = _page_money(result['orig'])
@@ -157,7 +157,7 @@ def _scrape_product_page(asin):
                     'deal_badge': '', 'resale': None, 'seller_id': '',
                     'extra': None, '_offer_raw': {}, '_source': 'amazon_page'}
         except Exception as e:
-            print(f"   ⚠️ [PAGE] {asin} attempt {attempt+1}/2: {str(e)[:150]}")
+            print(f"   ⚠️ [PAGE] {asin} attempt {attempt+1}/2: {type(e).__name__}: {str(e)[:200]}", flush=True)
         finally:
             try:
                 if browser: browser.close()
@@ -2173,9 +2173,9 @@ async def handler(event):
         min_disc = MIN_DISCOUNT.get(uname)
         max_price = MAX_PRICE.get(uname)
         for a in all_asins[:8]:          # حد أقصى 8 منتجات
-            d = get_product(a)
+            d = await asyncio.to_thread(get_product, a)
             if not d:
-                d = get_product(a)       # محاولة تانية لو فشلت
+                d = await asyncio.to_thread(get_product, a)       # محاولة تانية لو فشلت
             if not d:
                 print(f"      ⚠️ {a}: مقدرتش أجيب بياناته — اتخطّى")
                 continue
@@ -2225,7 +2225,7 @@ async def handler(event):
             return
     elif (uname in BUILD_POST_SOURCES or _had_promo_with_asin) and asin:
         print(f"   📦 بجيب بيانات {asin} من أمازون...")
-        data = get_product(asin)
+        data = await asyncio.to_thread(get_product, asin)
         if data:
             # كلمة ممنوعة في عنوان المنتج → يتلغى
             _bw = has_blocked_word(data.get('title'))
@@ -2700,7 +2700,7 @@ def _run_forever():
                 if not getattr(_main_loop, "handlers_registered", False):
                     await _register_source_handlers()
                     _main_loop.handlers_registered = True
-                print("✅ البوت متصل وشغّال...", flush=True)
+                print("✅ البوت متصل وشغّال — بانتظار بوستات جديدة من المصادر...", flush=True)
                 await client.run_until_disconnected()
                 print("⚠️ الاتصال اتقطع — بعيد الاتصال بعد 10 ثواني...", flush=True)
                 await _aio.sleep(10)
