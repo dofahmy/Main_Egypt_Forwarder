@@ -1,8 +1,8 @@
 """
 بوت نقل العروض — مصر (تاج حسب القناة المصدر)
 بيتابع قناتين:
-  - @AmazonEgyptOffers → اللينك بالتاج nonzz-21
-  - @Belnos          → اللينك بالتاج nooss-21
+  - @AmazonEgyptOffers → اللينك بالتاج egypt06-21
+  - @Belnos          → اللينك بالتاج egypt06-21
 بياخد الصورة من البوست الأصلي، ويمنع تكرار نفس المنتج في نفس اليوم.
 مفيش أسئلة — بيشتغل على طول.
 التثبيت:
@@ -727,14 +727,14 @@ API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 # مهم: اكتبي اسم القناة زي ما هو بالظبط على تليجرام (بالحروف الكبيرة والصغيرة الصح)
 SOURCES = {
     "@AmazonEgyptOffers":     {"tag": "-21",  "screenshot": True},
-    "@Belnos":                {"tag": "burnit-21",  "screenshot": True},
-    "@EGFastAmzn":            {"tag": "burnit-21", "screenshot": True},
-    "@Yo_Ayman":              {"tag": "burnit-21",  "screenshot": True},
-    "@ba3bou3_deals":         {"tag": "burnit-21", "screenshot": True},
+    "@Belnos":                {"tag": "egypt06-21",  "screenshot": True},
+    "@EGFastAmzn":            {"tag": "egypt06-21", "screenshot": True},
+    "@Yo_Ayman":              {"tag": "egypt06-21",  "screenshot": True},
+    "@ba3bou3_deals":         {"tag": "egypt06-21", "screenshot": True},
     "@melook_content":        {"tag": None, "screenshot": False},
-    "@Dina_Contents":         {"tag": "burnit-21", "screenshot": True},
-    "@dodohanem":             {"tag": "burnit-21", "screenshot": True},
-    "@Elwyy":                 {"tag": "burnit-21", "screenshot": True},
+    "@Dina_Contents":         {"tag": "egypt06-21", "screenshot": True},
+    "@dodohanem":             {"tag": "egypt06-21", "screenshot": True},
+    "@Elwyy":                 {"tag": "egypt06-21", "screenshot": True},
     "@HalaAmaz":              {"tag": "halola-21", "screenshot": True},
 }
 # نبني جداول مساعدة بالـ lowercase للمقارنة
@@ -824,7 +824,7 @@ MY_CHANNELS = ["@EgyptOffersHunter", "@HalaOffersEgypt"]
 HALA_CHANNEL = "@HalaOffersEgypt"
 HUNTER_CHANNEL = "@EgyptOffersHunter"
 MELOOK_CHANNEL = "@melook_content"
-# لو True: أي بوست يروح Hunter يروح كمان melook (بتاج burnit-21) — بيتحدد بسؤال أول التشغيل
+# لو True: أي بوست يروح Hunter يروح كمان melook (بتاج egypt06-21) — بيتحدد بسؤال أول التشغيل
 MIRROR_HUNTER_TO_MELOOK = False
 HALA_ALLOWED_SOURCES = set()   # مفيش مصدر بيتبعت على هالة تلقائياً (دينا ليها توجيه خاص)
 # توجيه خاص لكل مصدر: قنوات هدف محددة (بيتغلّب على التوجيه العام)
@@ -838,8 +838,8 @@ DINA_MARKER = "\u200b\u200c\u200b"   # ZWSP + ZWNJ + ZWSP
 # قنوات ليها تاج ثابت خاص بيها (بغض النظر عن القناة المصدر)
 # القنوات اللي مش هنا بتستخدم تاج القناة المصدر
 CHANNEL_TAG_OVERRIDE = {
-    "@HalaOffersEgypt": "burnit-21",
-    "@melook_content": "burnit-21",   # أي حاجة تروح ملوك أو حلا تاخد burnit-21
+    "@HalaOffersEgypt": "egypt06-21",
+    "@melook_content": "egypt06-21",   # أي حاجة تروح ملوك أو حلا تاخد egypt06-21
 }
 # ============ السكرين شوت (في thread منفصل) ============
 _PROFILE = os.getenv("PLAYWRIGHT_PROFILE", "/tmp/amazon_bot_profile_forwarder_eg" if SERVER_MODE else os.path.expanduser("~/amazon_bot_profile_forwarder_eg"))
@@ -1597,14 +1597,14 @@ async def read_page_price(asin, smid=None):
 # ============ فريم ملوّن حول السكرين شوت حسب التاج ============
 # كل تاج له لون مميز ثابت
 TAG_FRAME_COLORS = {
-    "nonzz-21":        (231, 76, 60),    # أحمر
-    "nooss-21":        (41, 128, 185),   # أزرق
+    "egypt06-21":        (231, 76, 60),    # أحمر
+    "egypt06-21":        (41, 128, 185),   # أزرق
     "kenzzz-21":       (39, 174, 96),    # أخضر
     "YouAy-21":        (155, 89, 182),   # بنفسجي
     "lowestlow-21":    (230, 126, 34),   # برتقالي
     "halola-21":       (26, 188, 156),   # فيروزي
     "wishitworkthe-21":(241, 196, 15),   # أصفر ذهبي
-    "burnit-21":       (192, 57, 43),    # أحمر غامق (يوسف أيمن)
+    "egypt06-21":       (192, 57, 43),    # أحمر غامق (يوسف أيمن)
     "dndnamer-21":     (142, 68, 173),   # موف (Dina)
 }
 def _color_for_tag(tag):
@@ -2623,10 +2623,10 @@ def _ask_active_sources():
     global MIRROR_HUNTER_TO_MELOOK
     print()
     ans = input(f"📢 أي بوست يتنشر على {HUNTER_CHANNEL} يتنقل لـ {MELOOK_CHANNEL} "
-                f"(نقل مباشر بتاج burnit-21)؟ (Y/N، Enter=Y): ").strip().lower()
+                f"(نقل مباشر بتاج egypt06-21)؟ (Y/N، Enter=Y): ").strip().lower()
     MIRROR_HUNTER_TO_MELOOK = ans not in ("n", "no", "لا", "لأ")
     if MIRROR_HUNTER_TO_MELOOK:
-        print(f"   ✅ هتابع {HUNTER_CHANNEL} وأنقل أي بوست عليه لـ {MELOOK_CHANNEL} (تاج burnit-21)")
+        print(f"   ✅ هتابع {HUNTER_CHANNEL} وأنقل أي بوست عليه لـ {MELOOK_CHANNEL} (تاج egypt06-21)")
     else:
         print(f"   ⏭️ مش هننقل من Hunter لـ {MELOOK_CHANNEL}")
     print()
@@ -2673,7 +2673,7 @@ def _register_source_handlers():
     client.add_event_handler(handler, events.NewMessage(chats=all_chats))
     client.add_event_handler(edit_handler, events.MessageEdited(chats=all_chats))
     if MIRROR_HUNTER_TO_MELOOK:
-        print(f"   📢 أي بوست يروح {HUNTER_CHANNEL} هينقل مباشرة لـ {MELOOK_CHANNEL} + {HALA_CHANNEL} (تاج burnit-21)")
+        print(f"   📢 أي بوست يروح {HUNTER_CHANNEL} هينقل مباشرة لـ {MELOOK_CHANNEL} + {HALA_CHANNEL} (تاج egypt06-21)")
 
 async def _mirror_to_melook_hala(built_text, shot, msg):
     """ينقل نفس البوست المبني والسكرين شوت اللي راح Hunter لقناة واحدة بالقرعة
@@ -2688,8 +2688,8 @@ async def _mirror_to_melook_hala(built_text, shot, msg):
     # نختار قناة واحدة بالقرعة العشوائية
     import random
     chan, chan_tag = random.choice([
-        (MELOOK_CHANNEL, CHANNEL_TAG_OVERRIDE.get(MELOOK_CHANNEL, "burnit-21")),
-        (HALA_CHANNEL, CHANNEL_TAG_OVERRIDE.get(HALA_CHANNEL, "burnit-21")),
+        (MELOOK_CHANNEL, CHANNEL_TAG_OVERRIDE.get(MELOOK_CHANNEL, "egypt06-21")),
+        (HALA_CHANNEL, CHANNEL_TAG_OVERRIDE.get(HALA_CHANNEL, "egypt06-21")),
     ])
     print(f"\n📢 [Hunter→{chan}] بوست: {built_text[:45]}...")
     try:
