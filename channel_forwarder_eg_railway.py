@@ -726,15 +726,15 @@ API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 # القنوات المصدر: (اسم القناة الأصلي) → (التاج, ياخد سكرين شوت؟)
 # مهم: اكتبي اسم القناة زي ما هو بالظبط على تليجرام (بالحروف الكبيرة والصغيرة الصح)
 SOURCES = {
-    "@AmazonEgyptOffers":     {"tag": "burmit-21",  "screenshot": True},
-    "@Belnos":                {"tag": "burmit-21",  "screenshot": True},
-    "@EGFastAmzn":            {"tag": "burmit-21", "screenshot": True},
-    "@Yo_Ayman":              {"tag": "burmit-21",  "screenshot": True},
-    "@ba3bou3_deals":         {"tag": "burmit-21", "screenshot": True},
+    "@AmazonEgyptOffers":     {"tag": "-21",  "screenshot": True},
+    "@Belnos":                {"tag": "burnit-21",  "screenshot": True},
+    "@EGFastAmzn":            {"tag": "burnit-21", "screenshot": True},
+    "@Yo_Ayman":              {"tag": "burnit-21",  "screenshot": True},
+    "@ba3bou3_deals":         {"tag": "burnit-21", "screenshot": True},
     "@melook_content":        {"tag": None, "screenshot": False},
-    "@Dina_Contents":         {"tag": "burmit-21", "screenshot": True},
-    "@dodohanem":             {"tag": "burmit-21", "screenshot": True},
-    "@Elwyy":                 {"tag": "burmit-21", "screenshot": True},
+    "@Dina_Contents":         {"tag": "burnit-21", "screenshot": True},
+    "@dodohanem":             {"tag": "burnit-21", "screenshot": True},
+    "@Elwyy":                 {"tag": "burnit-21", "screenshot": True},
     "@HalaAmaz":              {"tag": "halola-21", "screenshot": True},
 }
 # نبني جداول مساعدة بالـ lowercase للمقارنة
@@ -1604,7 +1604,7 @@ TAG_FRAME_COLORS = {
     "lowestlow-21":    (230, 126, 34),   # برتقالي
     "halola-21":       (26, 188, 156),   # فيروزي
     "wishitworkthe-21":(241, 196, 15),   # أصفر ذهبي
-    "burmit-21":       (192, 57, 43),    # أحمر غامق (يوسف أيمن)
+    "burnit-21":       (192, 57, 43),    # أحمر غامق (يوسف أيمن)
     "dndnamer-21":     (142, 68, 173),   # موف (Dina)
 }
 def _color_for_tag(tag):
