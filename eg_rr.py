@@ -998,7 +998,7 @@ def _shot_and_price_sync(asin, smid=None):
         pw = ctx = None
         try:
             pw = sync_playwright().start()
-            kwargs = dict(viewport={"width": 1280, "height": 1100}, locale="ar-EG",
+            kwargs = dict(viewport={"width": 1280, "height": 1100}, locale="ar-EG", device_scale_factor=2,
                           args=["--lang=ar-EG", "--no-sandbox", "--disable-dev-shm-usage"], ignore_default_args=["--disable-extensions"])
             if use_chrome:
                 kwargs["channel"] = "chrome"; kwargs["headless"] = False
@@ -1035,11 +1035,18 @@ def _shot_and_price_sync(asin, smid=None):
             except Exception:
                 pass
 
-            # نصغّر الصفحة كلها (zoom out) قبل السكرين شوت — 0.67 = 67%
-            ZOOM = 0.67
+            # نخلي الصفحة بالحجم الطبيعي بدل zoom-out القديم (67%)
+            # ونكبّر العنوان والسعر فقط بدون ما نلخبط حساب أماكن العناصر.
             try:
-                page.evaluate(f"document.body.style.zoom = '{ZOOM}'")
-                time.sleep(1)
+                page.add_style_tag(content="""
+                    #productTitle {font-size: 23px !important; line-height: 1.55 !important;}
+                    #corePriceDisplay_desktop_feature_div .a-price-whole,
+                    #corePrice_feature_div .a-price-whole,
+                    #apex_desktop .a-price-whole {font-size: 32px !important;}
+                    #corePriceDisplay_desktop_feature_div .a-price,
+                    #corePrice_feature_div .a-price {line-height: 1.35 !important;}
+                """)
+                time.sleep(0.6)
             except Exception:
                 pass
 
@@ -1105,7 +1112,7 @@ def _shot_and_price_sync(asin, smid=None):
 
             if not img_box:
                 shot = page.screenshot(clip={"x": 0, "y": 0, "width": 1280, "height": 900},
-                                       type="jpeg", quality=88)
+                                       type="jpeg", quality=94)
                 return shot, None, page_price
 
             top = max(0, img_box["y"] - 12)
@@ -1121,19 +1128,20 @@ def _shot_and_price_sync(asin, smid=None):
             print(f"   ✂️ القص: {right-left:.0f}×{h:.0f}px")
             shot = page.screenshot(
                 clip={"x": left, "y": top, "width": right - left, "height": h},
-                type="jpeg", quality=90)
+                type="jpeg", quality=94)
 
+            # Screenshot DPR=2: إحداثيات Playwright بوحدات CSS، لكن الصورة بوحدات pixels.
             rel_price = None
             if price_box:
                 rel_price = {
-                    "x": price_box["x"] - left,
-                    "y": price_box["y"] - top,
-                    "w": price_box["width"],
-                    "h": price_box["height"],
+                    "x": (price_box["x"] - left) * 2,
+                    "y": (price_box["y"] - top) * 2,
+                    "w": price_box["width"] * 2,
+                    "h": price_box["height"] * 2,
                 }
                 # يمين العنوان (بداية العنوان في RTL) — عشان الحد اليمين للفريم يتحاذى معاها
                 if center_box:
-                    rel_price["title_right"] = (center_box["x"] + center_box["width"]) - left
+                    rel_price["title_right"] = ((center_box["x"] + center_box["width"]) - left) * 2
             return shot, rel_price, page_price
         except Exception as e:
             if not use_chrome:
@@ -1201,6 +1209,15 @@ def _screenshot_sync(asin_or_url, is_url=False, tall=False, smid=None):
                 target += f"?smid={smid}"
             page.goto(target, wait_until="domcontentloaded", timeout=40000)
             time.sleep(4 if is_url else 2)   # صفحات البحث محتاجة وقت أطول
+            if not is_url:
+                try:
+                    page.add_style_tag(content="""
+                        #productTitle {font-size: 23px !important; line-height: 1.5 !important;}
+                        #corePriceDisplay_desktop_feature_div .a-price-whole,
+                        #corePrice_feature_div .a-price-whole {font-size: 30px !important;}
+                    """)
+                except Exception:
+                    pass
             # لصفحات البحث/العروض: ناخد أول صف منتجات بس (مش الصفحة كلها)
             if is_url and "/s?" in target:
                 shot = None
@@ -1222,13 +1239,13 @@ def _screenshot_sync(asin_or_url, is_url=False, tall=False, smid=None):
                             clip={"x": max(0, x0 - 5), "y": max(0, top - 5),
                                   "width": min(1280 - x0, x1 - x0 + 10),
                                   "height": min(900, y1 - top + 10)},
-                            type="jpeg", quality=88)
+                            type="jpeg", quality=94)
                         print(f"      📐 أول صف: {len(row)} منتج")
                 except Exception as e:
                     print(f"      ⚠️ مالقيتش صف المنتجات: {str(e)[:60]}")
                 if shot is None:
                     shot = page.screenshot(clip={"x": 0, "y": 0, "width": 1280, "height": _h},
-                                           type="jpeg", quality=85)
+                                           type="jpeg", quality=92)
             else:
                 # للمنتج المفرد: نقص من أعلى صورة المنتج لحد أسفل العنوان
                 shot = None
@@ -1262,12 +1279,12 @@ def _screenshot_sync(asin_or_url, is_url=False, tall=False, smid=None):
                         print(f"   ✂️ القص: العرض {right-left:.0f}px (الأعمدة) × الطول {h:.0f}px (لحد نهاية الصورة)")
                         shot = page.screenshot(
                             clip={"x": left, "y": top, "width": right - left, "height": h},
-                            type="jpeg", quality=88)
+                            type="jpeg", quality=94)
                 except Exception as e:
                     print(f"   ⚠️ مالقيتش عناصر المنتج: {str(e)[:60]}")
                 if shot is None:
                     shot = page.screenshot(clip={"x": 0, "y": 0, "width": 1280, "height": _h},
-                                           type="jpeg", quality=85)
+                                           type="jpeg", quality=92)
                 # نقرا السعر من نفس الصفحة (عشان مانفتحش الصفحة تاني للسعر)
                 if not is_url:
                     try:
@@ -1392,7 +1409,7 @@ def _multi_cards_sync(items):
                                 break
                             el = None
                     if el:
-                        shots.append(el.screenshot(type="jpeg", quality=88))
+                        shots.append(el.screenshot(type="jpeg", quality=94))
                         print(f"      ✅ كارت {a} اتجاب")
                     else:
                         # مالقيناش الكارت في البحث → نفتح صفحة المنتج نفسها ونقص صورته+عنوانه
@@ -1410,7 +1427,7 @@ def _multi_cards_sync(items):
                                     break
                                 pel = None
                             if pel:
-                                shots.append(pel.screenshot(type="jpeg", quality=88))
+                                shots.append(pel.screenshot(type="jpeg", quality=94))
                                 print(f"      ✅ كارت {a} اتجاب من صفحة المنتج")
                             else:
                                 print(f"      ❌ كارت {a} مش موجود خالص — اتخطّى")
