@@ -692,7 +692,7 @@ def _in_time_window(uname):
 NODISC_HEADLINE_SOURCES = {"egfastdeals"}
 # حد أدنى للخصم لكل قناة (القنوات اللي مش هنا = مفيش حد أدنى)
 MIN_DISCOUNT = {
-    "egfastdeals": 40,   # كنز: 40% أو أكتر بس
+    "egfastdeals": 0,   # كنز: 40% أو أكتر بس
 }
 # حد أقصى للسعر: منتج أغلى من كده مايتبعتش (لكل قناة)
 MAX_PRICE = {
