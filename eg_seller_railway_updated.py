@@ -3240,6 +3240,10 @@ def _run_forever():
                     print("❌ Telegram revoked this session because it was used simultaneously from different IPs. Stop all workers using this session; create a NEW one only after stopping them. Restarting will NOT repair it.", flush=True)
                     await client.disconnect()
                     return
+                if SERVER_MODE and "Telegram session is invalid/expired" in str(e):
+                    print("❌ Invalid Telegram session. Set a NEW TELEGRAM_SESSION in Railway Variables and redeploy. Stopping retries.", flush=True)
+                    await client.disconnect()
+                    return
                 print(f"⚠️ خطأ: {str(e)[:180]} — بعيد المحاولة بعد 15 ثانية...", flush=True)
                 await client.disconnect()
                 await _aio.sleep(15)
