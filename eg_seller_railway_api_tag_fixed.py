@@ -1917,6 +1917,73 @@ def add_frame(shot_bytes, tag, width=3):
     except Exception as e:
         print(f"   ⚠️ الفريم فشل: {str(e)[:50]}")
         return shot_bytes
+def _amazon_promo_title(page):
+    """Read the promotion heading ONLY from the Amazon page DOM (never Telegram text).
+
+    Amazon promo landing pages often have no h1 and sometimes mix Arabic currency
+    words with English offer terms.  Avoid product titles, prices and navigation.
+    """
+    try:
+        candidates = page.evaluate(r"""() => {
+          const sels = [
+            'h1', '[data-testid*="promotion-title"]', '[class*="promotionTitle"]',
+            '[class*="promotion-title"]', '[id*="promotionTitle"]',
+            '[class*="PromotionTitle"]', '[data-csa-c-content-id*="promotion"]',
+            '.a-section.a-spacing-none h2', 'main h2',
+            'meta[property="og:title"]', 'meta[name="twitter:title"]'
+          ];
+          const found = [];
+          for (let i=0;i<sels.length;i++) {
+            for (const el of Array.from(document.querySelectorAll(sels[i])).slice(0,8)) {
+              const t=(el.getAttribute('content') || el.innerText || el.textContent || '').replace(/\s+/g,' ').trim();
+              if(t) found.push({text:t, priority:i, y:el.getBoundingClientRect?.().top ?? 0});
+            }
+          }
+          // Some Amazon promo banners are generic DIV/SPAN nodes, not H1/H2.
+          // Scan only short visible text near the top, excluding product cards.
+          const els=document.querySelectorAll('body div, body span, body p, body strong, body b');
+          let n=0;
+          for(const el of els) {
+            if(++n > 2200 || found.length>250) break;
+            if(el.closest('[data-asin], [data-component-type="s-search-result"], nav, footer, header')) continue;
+            const rect=el.getBoundingClientRect();
+            if(rect.width<40 || rect.height<8 || rect.top < -50 || rect.top>850) continue;
+            if(el.children.length>3) continue;
+            const t=(el.innerText || '').replace(/\s+/g,' ').trim();
+            if(t && t.length>=8 && t.length<=170 && /\b(save|spend|buy|get|discount|off|offer)\b|(?:وفر|خصم|اشتري|اشتر|احصل)/i.test(t))
+              found.push({text:t, priority:20, y:rect.top});
+          }
+          return found;
+        }""")
+    except Exception as exc:
+        print(f"   ⚠️ تعذر قراءة عنوان البروموشن من DOM: {str(exc)[:100]}")
+        return None
+    scored = []
+    for item in candidates or []:
+        title = re.sub(r"\s+", " ", str(item.get("text") or "")).strip(" .|:-")
+        if not (8 <= len(title) <= 170):
+            continue
+        if re.search(r"(?:تسجيل الدخول|تسوق حسب|السلة|التقييمات|أضف إلى|add to cart|sign in|sort by)", title, re.I):
+            continue
+        # Require an OFFER expression rather than a product name or ordinary page heading.
+        has_offer = bool(re.search(r"\b(?:save|spend|buy|get|discount|offer|off)\b|(?:وفر|خصم|اشتري|اشتر|احصل)", title, re.I))
+        if not has_offer:
+            continue
+        priority = int(item.get("priority", 20))
+        y = float(item.get("y") or 0)
+        score = (5 if priority == 0 else 3 if priority < 7 else 1)
+        score += 3 if re.search(r"\b(?:when you spend|save .*when|buy .*get)\b", title, re.I) else 0
+        score += 1 if 10 <= len(title) <= 105 else 0
+        score -= 2 if y > 650 else 0
+        scored.append((score, -priority, title))
+    if not scored:
+        print("   ⚠️ لم أجد عنوان بروموشن موثوق في صفحة أمازون")
+        return None
+    scored.sort(reverse=True)
+    title = scored[0][2]
+    print(f"   🏷️ عنوان أمازون المستخرج: {title[:130]}")
+    return title
+
 def _promo_sync(url):
     """يفتح صفحة البروموشن: ياخد سكرين شوت + يطلّع نص العرض والبراندات"""
     if not PLAYWRIGHT:
@@ -1945,18 +2012,9 @@ def _promo_sync(url):
                 page.mouse.wheel(0, -700); time.sleep(1)
             except:
                 pass
-            # نص العرض من h1 (العنوان الثابت للصفحة)
-            offer = None
-            h1 = None
-            try:
-                h1 = page.query_selector("h1")
-                if h1:
-                    t = (h1.inner_text() or "").strip().rstrip(".")
-                    t = re.sub(r'\s+', ' ', t)
-                    if t and len(t) < 90:
-                        offer = t
-            except:
-                pass
+            # عنوان العرض من عناصر صفحة أمازون فقط، حتى لو مختلط عربي/إنجليزي.
+            offer = _amazon_promo_title(page)
+            h1 = page.query_selector("h1")
             # البراندات من الفلاتر الجانبية
             brands = []
             try:
@@ -2041,7 +2099,12 @@ def _arabic_promo_heading(title):
         return None
     arabic_count = len(re.findall(r"[\u0600-\u06FF]", title))
     latin_count = len(re.findall(r"[A-Za-z]", title))
-    if not latin_count or arabic_count >= latin_count:
+    # Arabic titles that merely contain an English brand name stay unchanged.
+    # Mixed-language Amazon promo headings (e.g. "Save 50 جنيه when you spend 300")
+    # must be translated despite containing Arabic currency words.
+    has_english_promo_terms = bool(re.search(
+        r"(?i)\b(?:save|when|spend|selected|products|offer|discount|buy|get|off|extra|coupon|purchase|eligible)\b", title))
+    if not latin_count or (arabic_count >= latin_count and not has_english_promo_terms):
         return title
     try:
         # Public Google Translate endpoint; no API key, so service availability is not guaranteed.
@@ -2053,6 +2116,15 @@ def _arabic_promo_heading(title):
         translated = "".join(x[0] for x in chunks if isinstance(x, list) and x and isinstance(x[0], str)).strip()
         if not re.search(r"[\u0600-\u06FF]", translated):
             raise ValueError("translation is not Arabic")
+        # Offer amounts and percentages must survive machine translation unchanged.
+        import unicodedata as _ud
+        def _nums(value):
+            normalized = "".join(str(_ud.digit(c)) if c.isdigit() and not c.isascii() else c for c in value)
+            return sorted(re.findall(r"\d+(?:[.,]\d+)?", normalized))
+        if _nums(title) != _nums(translated):
+            raise ValueError("translation changed offer amounts or percentages")
+        if re.search(r"(?i)\b(?:save|when you spend|buy|get|discount|off)\b", translated):
+            raise ValueError("English promotional terms remain untranslated")
         print(f"   🌐 عنوان البروموشن اتترجم للعربي: {title[:80]} → {translated[:80]}")
         return translated
     except Exception as e:
@@ -2433,7 +2505,7 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
         return
     if n_promo == 1:
         if not promo_title:
-            print("   ⏭️ مفيش عنوان مؤكد للبروموشن من الصفحة — اتخطّى")
+            print("   ⏭️ مفيش عنوان موثوق من صفحة أمازون — البروموشن اتخطّى (مش هنستخدم نص المصدر)")
             return
         promo_title = await asyncio.to_thread(_arabic_promo_heading, promo_title)
         if not promo_title:
@@ -2694,6 +2766,8 @@ async def handler(event):
         if promo_url:
             print(f"   🎁 بوست عرض — بجيب تفاصيله من الصفحة...")
             promo_shot, offer_txt, brands = await get_promo_info(promo_url)
+            if not offer_txt:
+                print("   ⏭️ صفحة أمازون بدون عنوان عرض موثوق — مش هنستخدم عنوان القناة المصدر")
             if offer_txt:
                 offer_txt = await asyncio.to_thread(_arabic_promo_heading, offer_txt)
                 if not offer_txt:
