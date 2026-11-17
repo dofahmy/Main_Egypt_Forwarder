@@ -2033,6 +2033,47 @@ def _promo_sync(url):
             except:
                 pass
     return None, None, []
+# Translate ONLY the heading extracted from the promotion page; products and links stay unchanged.
+def _arabic_promo_heading(title):
+    """Keep Arabic headings; translate non-Arabic headings to Arabic (fail closed)."""
+    title = re.sub(r"\s+", " ", (title or "")).strip()
+    if not title:
+        return None
+    arabic_count = len(re.findall(r"[\u0600-\u06FF]", title))
+    latin_count = len(re.findall(r"[A-Za-z]", title))
+    if not latin_count or arabic_count >= latin_count:
+        return title
+    try:
+        # Public Google Translate endpoint; no API key, so service availability is not guaranteed.
+        r = requests.get("https://translate.googleapis.com/translate_a/single",
+                         params={"client": "gtx", "sl": "auto", "tl": "ar", "dt": "t", "q": title},
+                         timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        chunks = r.json()[0]
+        translated = "".join(x[0] for x in chunks if isinstance(x, list) and x and isinstance(x[0], str)).strip()
+        if not re.search(r"[\u0600-\u06FF]", translated):
+            raise ValueError("translation is not Arabic")
+        print(f"   🌐 عنوان البروموشن اتترجم للعربي: {title[:80]} → {translated[:80]}")
+        return translated
+    except Exception as e:
+        print(f"   ⚠️ فشل ترجمة عنوان البروموشن: {type(e).__name__}: {str(e)[:90]}")
+        return None   # Don't publish an English heading as if it had been translated.
+
+def _promo_dedup_id(url):
+    """Same promotion across sources and affiliate tracking tags => same dedup ID."""
+    from urllib.parse import urlsplit, parse_qs
+    u = urlsplit(url)
+    path = re.sub(r"^/-(?:ar|en)/", "/", u.path, flags=re.I).rstrip("/").lower()
+    for expression in (r"/promotion/(?:psp/)?([a-z0-9_-]+)", r"/fmc/([a-z0-9_-]+)"):
+        match = re.search(expression, path, re.I)
+        if match:
+            return "promo:" + match.group(1).lower()
+    query = parse_qs(u.query)
+    if path.endswith('/fmc') and query.get('node'):
+        return 'fmc:' + query['node'][0]
+    # Fallback for alternate Amazon landing paths, not the source Telegram message ID.
+    return 'promourl:' + path + ':' + str(query.get('node', [''])[0])
+
 async def get_promo_info(url):
     """سكرين شوت + نص العرض + البراندات من صفحة بروموشن"""
     loop = asyncio.get_running_loop()
@@ -2371,9 +2412,11 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
     # منع التكرار: بمعرّف الرسالة (البروموشنز مالهاش ASIN ثابت)
     global SENT_TODAY
     SENT_TODAY = load_sent_today()
-    dedup_key = f"promopost:{src_name}:{msg.id}"
-    if dedup_key in SENT_TODAY:
-        print(f"   🔁 بوست البروموشنز ده اتبعت قبل كده — اتخطّى")
+    dedup_key = _promo_dedup_id(first_promo_url)
+    # Check the destination individually: the same promotion from another source must not repeat.
+    channels = [c for c in channels if f"{dedup_key}:{c}" not in SENT_TODAY]
+    if not channels:
+        print(f"   🔁 نفس البروموشن اتبعت قبل كده خلال {DEDUP_HOURS} ساعات — اتخطّى")
         return
 
     # سكرين شوت + (للبروموشن الواحد) العنوان من صفحة البروموشن
@@ -2388,8 +2431,14 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
     if not shot:
         print("   ⛔ مفيش سكرين شوت للبروموشن — البوست اتخطّى خالص")
         return
-    SENT_TODAY[dedup_key] = _now_ts()
-    save_sent_today(SENT_TODAY)
+    if n_promo == 1:
+        if not promo_title:
+            print("   ⏭️ مفيش عنوان مؤكد للبروموشن من الصفحة — اتخطّى")
+            return
+        promo_title = await asyncio.to_thread(_arabic_promo_heading, promo_title)
+        if not promo_title:
+            print("   ⏭️ عنوان البروموشن غير عربي والترجمة فشلت — مش هننشره بعنوان إنجليزي")
+            return
     sent_ok = False
     for chan in channels:
         try:
@@ -2414,12 +2463,11 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
             await client.send_file(chan, img, caption=promo_caption[:1024] if chan != HUNTER_CHANNEL else promo_caption,
                                    force_document=False, parse_mode=promo_pm)
             print(f"   ✅ اتبعت بوست البروموشنز على {chan} (تاج {chan_tag})")
+            SENT_TODAY[f"{dedup_key}:{chan}"] = _now_ts()
+            save_sent_today(SENT_TODAY)
             sent_ok = True
         except Exception as e:
             print(f"   ❌ خطأ في الإرسال على {chan}: {e}")
-    if not sent_ok:
-        SENT_TODAY.pop(dedup_key, None)
-        save_sent_today(SENT_TODAY)
 
 async def handler(event):
     msg = event.message
@@ -2474,9 +2522,7 @@ async def handler(event):
         return
     # القنوات المشروطة: لو البوست الأصلي مالوش صورة → اسكيب
     # (لو صاحب القناة مانزّلش صورة، غالباً الصورة مش كويسة)
-    if uname in AMAZON_ONLY_SOURCES and not getattr(msg, "photo", None):
-        print(f"   ⏭️ [{src_name}] البوست الأصلي مالوش صورة — مش هنبني له بوست")
-        return
+    _missing_source_photo = uname in AMAZON_ONLY_SOURCES and not getattr(msg, "photo", None)
     # Do not discard posts before resolving recognized short-link hosts.
     if not any(_public_http_url(u) for u in LINK_RE.findall(text)):
         print("   ⏭️ مفيهوش لينك أمازون — اتخطّى")
@@ -2538,7 +2584,7 @@ async def handler(event):
         is_all_promo = False
         first_promo_url = None
         n_promo = 0
-        if uname == "elwyy" and not asin:   # بس elwyy + مفيش أول ASIN
+        if uname == "elwyy" and not asin:   # Existing special multi-promotion handling for Elwyy
             for u in LINK_RE.findall(text):
                 if _public_http_url(u):
                     a, final_u = extract_asin(u)
@@ -2637,9 +2683,9 @@ async def handler(event):
     promo_shot = None
     built = False          # هل اتبنى بوست فعلاً (مش نقل نص)
     _reuse_shot = None     # سكرين شوت اتاخد وقت البناء (نعيد استخدامه)
-    # القنوات المشروطة (أمازون بس): مابناخدش منها بروموشن خالص
-    if has_promo and uname in AMAZON_ONLY_SOURCES:
-        print(f"   ⏭️ [{src_name}] بوست بروموشن — مابناخدش بروموشن من القناة دي")
+    # Allow promotions from all sources. Amazon-only product/search restrictions stay intact.
+    if _missing_source_photo and not has_promo:
+        print(f"   ⏭️ [{src_name}] البوست الأصلي مالوش صورة ومش بروموشن — اتخطّى")
         _release_all()
         return
     if has_promo:
@@ -2649,6 +2695,11 @@ async def handler(event):
             print(f"   🎁 بوست عرض — بجيب تفاصيله من الصفحة...")
             promo_shot, offer_txt, brands = await get_promo_info(promo_url)
             if offer_txt:
+                offer_txt = await asyncio.to_thread(_arabic_promo_heading, offer_txt)
+                if not offer_txt:
+                    print("   ⏭️ عنوان البروموشن غير عربي والترجمة فشلت — مش هننشر عنوان إنجليزي")
+                    _release_all()
+                    return
                 import random as _r
                 line = f"{_r.choice(OFFER_ICONS)} {_esc(offer_txt)}"
                 if brands:
@@ -2657,7 +2708,9 @@ async def handler(event):
                 built = True
                 print(f"   ✏️ {offer_txt}" + (f" | براندات: {', '.join(brands[:4])}" if brands else ""))
             else:
-                print(f"   ⚠️ مقدرتش أجيب نص العرض")
+                print(f"   ⚠️ مقدرتش أجيب نص العرض — مش هننشر عنوان غير متحقق منه")
+                _release_all()
+                return
     elif (uname in BUILD_POST_SOURCES or _had_promo_with_asin) and len(all_asins) > 1:
         # بوست فيه كذا منتج → نجيب بياناتهم كلهم ونبنيهم في بوست واحد
         print(f"   📦 البوست فيه {len(all_asins)} منتجات — بجيب بياناتهم...")
