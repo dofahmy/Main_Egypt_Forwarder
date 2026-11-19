@@ -1984,10 +1984,105 @@ def _amazon_promo_title(page):
     print(f"   🏷️ عنوان أمازون المستخرج: {title[:130]}")
     return title
 
+# ============ Promotion validity: Amazon landing page ONLY ============
+def _promotion_dates_from_amazon(text, current_time=None):
+    """Return (status, start_date, end_date) from the Amazon promotion date banner.
+
+    Status: active / upcoming / expired / unknown. Dates are interpreted as
+    inclusive *calendar days* in Egypt; missing/ambiguous dates fail closed.
+    Never infer validity from the source Telegram caption or a product's dealDetails.
+    """
+    import unicodedata
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    raw = unicodedata.normalize('NFKC', str(text or ''))
+    raw = ''.join(str(unicodedata.digit(c)) if c.isdigit() and not c.isascii() else c for c in raw)
+    raw = re.sub(r'\s+', ' ', raw).strip()
+    # Only text from the promo header/banner is passed to this function.
+    months = {
+        'يناير': 1, 'جانفي': 1, 'january': 1, 'jan': 1,
+        'فبراير': 2, 'فيفري': 2, 'february': 2, 'feb': 2,
+        'مارس': 3, 'march': 3, 'mar': 3,
+        'أبريل': 4, 'ابريل': 4, 'إبريل': 4, 'أفريل': 4, 'april': 4, 'apr': 4,
+        'مايو': 5, 'ماي': 5, 'may': 5,
+        'يونيو': 6, 'يونيه': 6, 'june': 6, 'jun': 6,
+        'يوليو': 7, 'يوليه': 7, 'july': 7, 'jul': 7,
+        'أغسطس': 8, 'اغسطس': 8, 'أوت': 8, 'august': 8, 'aug': 8,
+        'سبتمبر': 9, 'september': 9, 'sep': 9,
+        'أكتوبر': 10, 'اكتوبر': 10, 'october': 10, 'oct': 10,
+        'نوفمبر': 11, 'november': 11, 'nov': 11,
+        'ديسمبر': 12, 'december': 12, 'dec': 12,
+    }
+    month_part = '|'.join(sorted(map(re.escape, months), key=len, reverse=True))
+    # Arabic: من 20 نوفمبر 2026 حتى 26 نوفمبر 2026
+    # English: Nov 20, 2026 - Nov 26, 2026
+    patterns = [
+        rf'(?P<d>\d{{1,2}})\s+(?P<m>{month_part})\s*,?\s*(?P<y>20\d{{2}})',
+        rf'(?P<m>{month_part})\s+(?P<d>\d{{1,2}})\s*,?\s*(?P<y>20\d{{2}})',
+        r'(?<!\d)(?P<y>20\d{2})[-/](?P<mo>\d{1,2})[-/](?P<d>\d{1,2})(?!\d)',
+    ]
+    matches = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, raw, re.I):
+            try:
+                gd=m.groupdict()
+                month = int(gd['mo']) if gd.get('mo') else months[gd['m'].lower()]
+                value = date(int(gd['y']), month, int(gd['d']))
+                matches.append((m.start(), m.end(), value))
+            except (ValueError, KeyError):
+                continue
+    matches.sort()
+    # The page can contain unrelated dates (footer etc.). Require a nearby
+    # paired date range, with no other date candidates to cause ambiguity.
+    pairs=[]
+    for a,b in zip(matches, matches[1:]):
+        between=raw[a[1]:b[0]]
+        if len(between) <= 45 and re.search(r'(?i)(?:حتى|إلى|الى|لغاية|to|through|until|[-–—])', between):
+            pairs.append((a[2], b[2]))
+    pairs=list(dict.fromkeys(pairs))
+    if len(pairs)!=1:
+        return 'unknown', None, None
+    start,end=pairs[0]
+    if start>end:
+        return 'unknown', start, end
+    now=(current_time or datetime.now(ZoneInfo('Africa/Cairo'))).date()
+    return ('upcoming' if now<start else 'expired' if now>end else 'active'), start, end
+
+
+def _amazon_promotion_validity(page):
+    """Inspect visible Amazon header text, NOT Telegram caption or product deal dates."""
+    try:
+        header = page.evaluate(r"""() => {
+          const result=[];
+          const selectors=['main','[role="main"]','[class*="promotion"]','[id*="promotion"]','body'];
+          for(const sel of selectors) {
+            for(const root of Array.from(document.querySelectorAll(sel)).slice(0,3)) {
+              const els=[root, ...Array.from(root.querySelectorAll('div,span,p,small,strong'))].slice(0,1800);
+              for(const el of els) {
+                if(el.closest('footer, nav, header, [data-asin], [data-component-type="s-search-result"]')) continue;
+                const r=el.getBoundingClientRect();
+                if(r.width<20 || r.height<5 || r.top < -20 || r.top > 420) continue;
+                if(el.children.length>4) continue;
+                const t=(el.innerText||'').replace(/\s+/g,' ').trim();
+                if(t.length>=15 && t.length<=250 && /(?:20[0-9]{2}|٢٠[٠-٩]{2}|20[0-9]{2})/.test(t)) result.push(t);
+              }
+            }
+            if(result.length) break;
+          }
+          return [...new Set(result)].slice(0,35).join(' | ');
+        }""")
+        status,start,end=_promotion_dates_from_amazon(header)
+        print(f'   📅 [AMAZON PROMO] {status} | start={start} end={end} | header={str(header)[:160]}')
+        return status
+    except Exception as exc:
+        print(f'   ⚠️ تعذر فحص تاريخ عرض أمازون: {type(exc).__name__}: {str(exc)[:100]}')
+        return 'unknown'
+
 def _promo_sync(url):
     """يفتح صفحة البروموشن: ياخد سكرين شوت + يطلّع نص العرض والبراندات"""
     if not PLAYWRIGHT:
-        return None, None, []
+        return None, None, [], "unknown"
     for use_chrome in ((False,) if SERVER_MODE else (True, False)):
         pw = ctx = None
         try:
@@ -2012,6 +2107,11 @@ def _promo_sync(url):
                 page.mouse.wheel(0, -700); time.sleep(1)
             except:
                 pass
+            # لا ننشر بروموشن إلا بعد إثبات أن فترة عرضه سارية من صفحة أمازون.
+            promo_status = _amazon_promotion_validity(page)
+            if promo_status != 'active':
+                print(f"   ⛔ بروموشن غير صالح للنشر (الحالة: {promo_status}) — لا تصوير ولا إرسال")
+                return None, None, [], promo_status
             # عنوان العرض من عناصر صفحة أمازون فقط، حتى لو مختلط عربي/إنجليزي.
             offer = _amazon_promo_title(page)
             h1 = page.query_selector("h1")
@@ -2024,6 +2124,16 @@ def _promo_sync(url):
                         brands.append(b)
             except:
                 pass
+            # A live promotion must expose the sidebar brand filters. Amazon
+            # sometimes keeps an expired/upcoming promo landing page visible,
+            # but removes the brands and eligible products from the sidebar.
+            # This is an *additional* fail-closed signal, not a substitute for
+            # checking the promotion date range above. Never infer brands from
+            # the incoming Telegram post.
+            if not brands:
+                print("   ⛔ [AMAZON PROMO] مفيش براندات في الفلاتر الجانبية — العرض غير مؤكد، اتخطّى")
+                return None, None, [], 'no_brands'
+            print(f"   ✅ [AMAZON PROMO] التاريخ ساري + {len(brands)} براند/فلتر جانبي")
             # السكرين شوت: من وصف العرض (h1) لحد آخر أول صف منتجات
             clip = {"x": 0, "y": 0, "width": 1280, "height": 1400}
             try:
@@ -2076,9 +2186,9 @@ def _promo_sync(url):
             except Exception as _e:
                 print(f"      ⚠️ مظبطتش القص: {str(_e)[:60]}")
             if not _ensure_no_cookie_overlay(page):
-                return None, None, []
+                return None, None, [], "unknown"
             shot = page.screenshot(clip=clip, type="jpeg", quality=85)
-            return shot, offer, brands
+            return shot, offer, brands, "active"
         except Exception as e:
             if use_chrome:
                 print("   ⚠️ Chrome فشل — بجرّب Chromium...")
@@ -2090,7 +2200,7 @@ def _promo_sync(url):
                 if pw: pw.stop()
             except:
                 pass
-    return None, None, []
+    return None, None, [], "unknown"
 # Translate ONLY the heading extracted from the promotion page; products and links stay unchanged.
 def _arabic_promo_heading(title):
     """Keep Arabic headings; translate non-Arabic headings to Arabic (fail closed)."""
@@ -2147,7 +2257,7 @@ def _promo_dedup_id(url):
     return 'promourl:' + path + ':' + str(query.get('node', [''])[0])
 
 async def get_promo_info(url):
-    """سكرين شوت + نص العرض + البراندات من صفحة بروموشن"""
+    """سكرين شوت + عنوان + براندات + صلاحية البروموشن من صفحة أمازون"""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_EXECUTOR, _promo_sync, url)
 async def get_page_screenshot(url):
@@ -2495,10 +2605,12 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
     promo_title = None
     if n_promo == 1:
         print(f"   📸 بحاول آخد سكرين شوت + عنوان البروموشن...")
-        shot, promo_title, _brands = await get_promo_info(first_promo_url)
+        shot, promo_title, _brands, _promo_status = await get_promo_info(first_promo_url)
     else:
-        print(f"   📸 بحاول آخد سكرين شوت لأول بروموشن...")
-        shot = await get_page_screenshot(first_promo_url)
+        # A multi-promotion caption must not bypass the date check.
+        # Reject rather than publish unverified additional promotions.
+        print("   ⏭️ بوست متعدد البروموشنز — محتاج تحقق صلاحية كل رابط؛ مش هننشره بدون تحقق")
+        return
 
     if not shot:
         print("   ⛔ مفيش سكرين شوت للبروموشن — البوست اتخطّى خالص")
@@ -2765,7 +2877,7 @@ async def handler(event):
                           if "/promotion/" in u or "/fmc/" in u), None)
         if promo_url:
             print(f"   🎁 بوست عرض — بجيب تفاصيله من الصفحة...")
-            promo_shot, offer_txt, brands = await get_promo_info(promo_url)
+            promo_shot, offer_txt, brands, _promo_status = await get_promo_info(promo_url)
             if not offer_txt:
                 print("   ⏭️ صفحة أمازون بدون عنوان عرض موثوق — مش هنستخدم عنوان القناة المصدر")
             if offer_txt:
