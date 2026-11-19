@@ -3293,6 +3293,22 @@ async def edit_handler(event):
 # loop يعيد الاتصال تلقائياً لو انقطع (بدل ما البوت يقف ويحتاج restart يدوي)
 # ملحوظة: الحلقة دي تحت __main__ عشان لو ملف تاني استورد البوت (زي متتبّع الأسعار)
 #         مايشغّلش البوت نفسه — بس ياخد الدوال والإعدادات
+async def _watched_message_handler(event):
+    """Bound a single message's processing time, including API/browser waits.
+
+    This is intentionally separate from the Telegram RPC watchdog: Telegram
+    may still respond even when an Amazon screenshot worker is wedged.
+    """
+    max_seconds = max(300, int(os.getenv("WATCHDOG_POST_TIMEOUT_SECONDS", "1200")))
+    if not SERVER_MODE or not _env_bool("WATCHDOG_ENABLED", True):
+        return await handler(event)
+    try:
+        return await asyncio.wait_for(handler(event), timeout=max_seconds)
+    except asyncio.TimeoutError:
+        print(f"🚨 [WATCHDOG] Message processing timed out after {max_seconds}s "
+              f"(chat={event.chat_id}, msg={event.message.id})", flush=True)
+        _watchdog_exit("Amazon/Telegram message processing timed out")
+
 async def _register_source_handlers():
     """Validate subscribed source channels before attaching listeners.
 
@@ -3326,7 +3342,7 @@ async def _register_source_handlers():
             print("🚨 [DODO CHECK] @dodohanem is NOT in this Telegram session's dialogs. Join the channel/group using the SAME Telegram account used to create TELEGRAM_SESSION.", flush=True)
     except Exception as exc:
         print(f"⚠️ [DODO CHECK] Membership could not be confirmed: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
-    client.add_event_handler(handler, events.NewMessage(chats=valid))
+    client.add_event_handler(_watched_message_handler, events.NewMessage(chats=valid))
     client.add_event_handler(edit_handler, events.MessageEdited(chats=valid))
     if MIRROR_HUNTER_TO_MELOOK:
         print(f"   📢 Hunter mirror enabled (tag burmito-21)")
@@ -3429,6 +3445,56 @@ def _restyle_for_channel(text, chan):
         out.append(s)
     return "\n".join(out)
 
+# ============ Railway self-healing watchdog ============
+# Telegram connection stays separate from Amazon / screenshots / message filters.
+# Quiet channels are NOT treated as a failure: we make real lightweight RPC calls.
+_WATCHDOG_PERIOD = max(30, int(os.getenv("WATCHDOG_PERIOD_SECONDS", "90")))
+_WATCHDOG_RPC_TIMEOUT = max(10, int(os.getenv("WATCHDOG_RPC_TIMEOUT_SECONDS", "35")))
+_WATCHDOG_FAIL_LIMIT = max(2, int(os.getenv("WATCHDOG_FAIL_LIMIT", "3")))
+_WATCHDOG_LOOP_STALL = max(120, int(os.getenv("WATCHDOG_LOOP_STALL_SECONDS", "240")))
+
+def _watchdog_exit(reason):
+    # Exit is intentionally nonzero: Railway must have restart policy ON_FAILURE or ALWAYS.
+    # NEVER start a second TelegramClient/worker within this process.
+    print(f"🚨 [WATCHDOG] {reason}; exiting process for Railway restart", flush=True)
+    os._exit(74)
+
+async def _telegram_watchdog():
+    from telethon.tl.functions.updates import GetStateRequest
+    errors = 0
+    print(f"🩺 [WATCHDOG] Telegram RPC check every {_WATCHDOG_PERIOD}s; "
+          f"restart after {_WATCHDOG_FAIL_LIMIT} consecutive failures", flush=True)
+    while True:
+        await asyncio.sleep(_WATCHDOG_PERIOD)
+        try:
+            # A successful Telegram server response, not just client.is_connected(),
+            # is proof that the transport and RPC dispatch loop are responding.
+            await asyncio.wait_for(client(GetStateRequest()), timeout=_WATCHDOG_RPC_TIMEOUT)
+            if errors:
+                print("✅ [WATCHDOG] Telegram RPC recovered", flush=True)
+            errors = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors += 1
+            print(f"⚠️ [WATCHDOG] Telegram RPC failed ({errors}/{_WATCHDOG_FAIL_LIMIT}): "
+                  f"{type(exc).__name__}: {str(exc)[:120]}", flush=True)
+            # If Telegram revoked auth, restarting won't repair it; let main loop
+            # log its normal invalid-session handling instead of repeated reboots.
+            if errors >= _WATCHDOG_FAIL_LIMIT:
+                _watchdog_exit("Telegram RPC not responding")
+
+async def _loop_pulse(pulse):
+    while True:
+        pulse["last"] = time.monotonic()
+        await asyncio.sleep(10)
+
+def _loop_stall_guard(pulse, stop):
+    # Separate OS thread still runs when synchronous code blocks asyncio's loop.
+    while not stop.wait(15):
+        if time.monotonic() - pulse["last"] > _WATCHDOG_LOOP_STALL:
+            _watchdog_exit(f"asyncio loop stalled for >{_WATCHDOG_LOOP_STALL}s")
+
 def _run_forever():
     import time as _t
     _print_banner()
@@ -3485,7 +3551,28 @@ def _run_forever():
                     await _register_source_handlers()
                     _main_loop.handlers_registered = True
                 print("✅ البوت متصل وشغّال — بانتظار بوستات جديدة من المصادر...", flush=True)
-                await client.run_until_disconnected()
+                # Use only one Railway worker/replica with this Telegram session.
+                # Both checks are independent of whether any new deals arrive.
+                _health_tasks = []
+                _health_stop = None
+                try:
+                    if SERVER_MODE and _env_bool("WATCHDOG_ENABLED", True):
+                        import threading
+                        _pulse = {"last": time.monotonic()}
+                        _health_stop = threading.Event()
+                        threading.Thread(target=_loop_stall_guard,
+                                         args=(_pulse, _health_stop),
+                                         daemon=True, name="railway-loop-watchdog").start()
+                        _health_tasks = [asyncio.create_task(_loop_pulse(_pulse)),
+                                         asyncio.create_task(_telegram_watchdog())]
+                    await client.run_until_disconnected()
+                finally:
+                    if _health_stop is not None:
+                        _health_stop.set()
+                    for _task in _health_tasks:
+                        _task.cancel()
+                    if _health_tasks:
+                        await asyncio.gather(*_health_tasks, return_exceptions=True)
                 print("⚠️ الاتصال اتقطع — بعيد الاتصال بعد 10 ثواني...", flush=True)
                 await _aio.sleep(10)
             except asyncio.CancelledError:
