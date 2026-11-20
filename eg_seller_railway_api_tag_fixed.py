@@ -2178,8 +2178,11 @@ def _promo_sync(url):
                     bottom = max(b["y"] + b["height"] for b in row) + 12
                     print(f"      📐 أول صف: {len(row)} منتج")
                 else:
-                    print(f"      ⚠️ مالقيتش كروت منتجات — هاخد مساحة معقولة تحت العنوان")
-                    bottom = top + 750
+                    # Never substitute a generic banner or an artificial card for
+                    # the actual Amazon promotion products. This can happen when
+                    # Amazon hasn't loaded eligible items or changes the DOM.
+                    print("      ⛔ [AMAZON PROMO] كروت المنتجات مش ظاهرة — مش هنصور صفحة عامة أو صورة بديلة")
+                    return None, None, [], 'no_product_cards'
                 h = max(200, min(1400, bottom - top))
                 clip = {"x": 0, "y": top, "width": 1280, "height": h}
                 print(f"      ✂️ القص: من y={top:.0f} لحد y={bottom:.0f} (ارتفاع {h:.0f})")
@@ -2606,33 +2609,63 @@ def _multi_promo_links(text):
     return list(unique.values())
 
 
-def _compose_promo_screenshots(shots):
-    """Create one JPEG containing a readable tile from each *validated* Amazon promo.
+def _promo_brands_caption(brands, limit=4):
+    """Restore the verified Amazon sidebar brand/product names in promo captions.
 
-    Raises on any image decode/composition problem: never show a partial collage.
+    Never source these names from the forwarded Telegram text. Preserve the
+    original single-promotion style, with a bounded number for photo captions.
     """
-    from PIL import Image, ImageOps, ImageDraw
+    unique = []
+    for brand in brands or []:
+        brand = re.sub(r"\s+", " ", str(brand)).strip()
+        if brand and brand.casefold() not in {b.casefold() for b in unique}:
+            unique.append(brand)
+        if len(unique) >= limit:
+            break
+    return " على منتجات " + " و ".join(unique) if unique else ""
+
+
+def _compose_promo_screenshots(shots):
+    """Stack real Amazon promotion product-grid screenshots, unchanged in content.
+
+    Never overlay invented labels such as 'Amazon promotion 1'. Preserve the
+    full width of Amazon's original screenshot, including its product cards
+    and the brand/refinement sidebar. Multi-offer images are stacked vertically
+    rather than squeezed into tiny side-by-side tiles.
+    """
+    from PIL import Image
     import io
     if not shots:
-        raise ValueError('No confirmed Amazon screenshots')
-    width, cell_height, margin, gap = 640, 510, 12, 12
-    cols = 1 if len(shots) == 1 else 2
-    rows = (len(shots) + cols - 1) // cols
-    cell_width = width if cols == 1 else width
-    canvas = Image.new('RGB', (margin * 2 + cols * cell_width + (cols-1)*gap,
-                               margin * 2 + rows * cell_height + (rows-1)*gap), '#ffffff')
-    dr = ImageDraw.Draw(canvas)
-    for idx, shot in enumerate(shots):
-        with Image.open(io.BytesIO(shot)) as original:
-            im = ImageOps.contain(original.convert('RGB'), (cell_width - 12, cell_height - 40))
-        x = margin + (idx % cols) * (cell_width + gap)
-        y = margin + (idx // cols) * (cell_height + gap)
-        dr.rounded_rectangle((x, y, x+cell_width-1, y+cell_height-1), radius=9,
-                             outline='#dddddd', width=2, fill='#ffffff')
-        dr.text((x+12, y+8), f'Amazon promotion {idx+1}', fill='#222222')
-        canvas.paste(im, (x + (cell_width-im.width)//2, y+34))
+        raise ValueError('No verified Amazon promotion screenshots')
+    images = []
+    for idx, shot in enumerate(shots, 1):
+        if not shot:
+            raise ValueError(f'Promotion {idx} has no Amazon screenshot')
+        with Image.open(io.BytesIO(shot)) as src:
+            im = src.convert('RGB')
+        if im.width < 400 or im.height < 150:
+            raise ValueError(f'Promotion {idx} screenshot is too small')
+        images.append(im)
+    # All source screenshots use the same 1280px-wide browser viewport.
+    # Do not shrink them to ~600px; text and actual product thumbnails disappear.
+    output_width = max(im.width for im in images)
+    gap = 10
+    max_total_height = 9500  # stay safely within Telegram photo dimensions
+    allowed_height = max_total_height - gap * (len(images) - 1)
+    total_height = sum(round(im.height * output_width / im.width) for im in images)
+    if total_height > allowed_height:
+        raise ValueError('Combined real Amazon screenshots exceed safe image height; refusing to shrink product cards')
+    canvas = Image.new('RGB', (output_width, total_height + gap * (len(images) - 1)), '#ffffff')
+    y = 0
+    for idx, im in enumerate(images, 1):
+        if im.width != output_width:
+            new_height = round(im.height * output_width / im.width)
+            im = im.resize((output_width, new_height), Image.Resampling.LANCZOS)
+        canvas.paste(im, (0, y))
+        y += im.height + gap
     output = io.BytesIO()
-    canvas.save(output, 'JPEG', quality=85, optimize=True)
+    canvas.save(output, 'JPEG', quality=90, optimize=True)
+    print(f'   🖼️ [MULTI PROMO] combined {len(images)} ORIGINAL Amazon screenshots: {canvas.width}x{canvas.height}, no generated titles', flush=True)
     return output.getvalue()
 
 
@@ -2699,13 +2732,25 @@ async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
                 if not new_url or not _amazon_host(new_url):
                     raise ValueError('Amazon promotion retagging failed')
                 # Amazon title and offer terms ONLY; nothing copied from source caption.
-                sections.append(f"🎁 {i}. {item['title']}\n🔗 {new_url}")
+                # Restore sidebar product/brand names in the DESCRIPTION,
+                # not just the screenshot. The title still comes from Amazon.
+                brand_phrase = _promo_brands_caption(item['brands'])
+                sections.append(f"🎁 {i}. {item['title']}{brand_phrase}\n🔗 {new_url}")
             caption = '\n\n'.join(sections)
             footer_allowance = 65 if chan == HUNTER_CHANNEL else 0
             if len(caption) + footer_allowance > 1024:
-                caption = '\n'.join(f"{i}. {it['title']} — {retag(it['url'], tag)[0]}" for i, it in enumerate(selected, 1))
+                # Reduce the number of sidebar names, not the offer titles or
+                # URLs. At least one verified Amazon brand remains per offer.
+                for brand_limit in (3, 2, 1):
+                    shorter = []
+                    for i, item in enumerate(selected, 1):
+                        link, _ = retag(item['url'], tag)
+                        shorter.append(f"🎁 {i}. {item['title']}{_promo_brands_caption(item['brands'], brand_limit)}\n🔗 {link}")
+                    caption = '\n\n'.join(shorter)
+                    if len(caption) + footer_allowance <= 1024:
+                        break
             if len(caption) + footer_allowance > 1024:
-                raise ValueError('Multiple promotion titles and links exceed Telegram photo caption limit')
+                raise ValueError('Multiple promotions with Amazon sidebar brands exceed Telegram photo caption limit')
             combined = await asyncio.to_thread(_compose_promo_screenshots, [x['shot'] for x in selected])
             framed = add_frame(combined, tag)
             publish_caption, publish_mode = _hunter_post_text(caption, chan, None, caption=True)
@@ -2785,7 +2830,9 @@ async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url,
                 retagged, _, _ = process_text(promo_text, chan_tag, keep_lines=True)
                 links = LINK_RE.findall(retagged)
                 link = links[0] if links else first_promo_url
-                chan_text = f"⚡️ عرض على {promo_title}\n\n{link}"
+                # The verified sidebar brands were previously extracted but
+                # omitted from this single-promotion posting route.
+                chan_text = f"⚡️ عرض على {promo_title}{_promo_brands_caption(_brands)}\n\n{link}"
             else:
                 # أكتر من واحد: النص الخام باللينكات مظبّطة
                 chan_text, _, _ = process_text(promo_text, chan_tag, keep_lines=True)
