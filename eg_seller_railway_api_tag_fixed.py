@@ -2233,8 +2233,16 @@ def _arabic_promo_heading(title):
             return sorted(re.findall(r"\d+(?:[.,]\d+)?", normalized))
         if _nums(title) != _nums(translated):
             raise ValueError("translation changed offer amounts or percentages")
+        # In e-commerce, 'Save' is a saving/discount, NEVER a rescue.
+        # Machine translation may produce 'إنقاذ' for English 'Save'; repair
+        # only if the *Amazon heading itself* contains this promotion verb.
+        if re.search(r"(?i)\bsave\b", title):
+            translated = re.sub(r"(?:الإنقاذ|إنقاذ|انقاذ|أنقذ|انقذ|قم بالإنقاذ)", "وفّر", translated)
+            translated = re.sub(r"\b(?:وفر|وفّر)\s+(?=(?:على|عند|حين|عندما|بشراء|عند شراء|\d))", "وفّر ", translated)
         if re.search(r"(?i)\b(?:save|when you spend|buy|get|discount|off)\b", translated):
             raise ValueError("English promotional terms remain untranslated")
+        if re.search(r"(?:الإنقاذ|إنقاذ|انقاذ|أنقذ|انقذ)", translated):
+            raise ValueError("Rescue wording is invalid for an Amazon discount")
         print(f"   🌐 عنوان البروموشن اتترجم للعربي: {title[:80]} → {translated[:80]}")
         return translated
     except Exception as e:
@@ -2579,6 +2587,150 @@ def _retag_all_links(text, new_tag):
         return u
     return LINK_RE.sub(_repl, text)
 
+def _multi_promo_links(text):
+    """Find ONLY distinct canonical Amazon promotion pages in the already-resolved post.
+
+    This never takes promotion descriptions from the originating Telegram message.
+    """
+    unique = {}
+    for raw in LINK_RE.findall(text or ""):
+        url = raw.rstrip(".,،؛")
+        if not _amazon_host(url):
+            continue
+        path = _urlparse(url).path.lower()
+        if not (re.search(r"/promotion/(?:psp/)?[a-z0-9_-]+", path)
+                or "/fmc/" in path or path.rstrip("/").endswith("/fmc")):
+            continue
+        key = _promo_dedup_id(url)
+        unique.setdefault(key, url)
+    return list(unique.values())
+
+
+def _compose_promo_screenshots(shots):
+    """Create one JPEG containing a readable tile from each *validated* Amazon promo.
+
+    Raises on any image decode/composition problem: never show a partial collage.
+    """
+    from PIL import Image, ImageOps, ImageDraw
+    import io
+    if not shots:
+        raise ValueError('No confirmed Amazon screenshots')
+    width, cell_height, margin, gap = 640, 510, 12, 12
+    cols = 1 if len(shots) == 1 else 2
+    rows = (len(shots) + cols - 1) // cols
+    cell_width = width if cols == 1 else width
+    canvas = Image.new('RGB', (margin * 2 + cols * cell_width + (cols-1)*gap,
+                               margin * 2 + rows * cell_height + (rows-1)*gap), '#ffffff')
+    dr = ImageDraw.Draw(canvas)
+    for idx, shot in enumerate(shots):
+        with Image.open(io.BytesIO(shot)) as original:
+            im = ImageOps.contain(original.convert('RGB'), (cell_width - 12, cell_height - 40))
+        x = margin + (idx % cols) * (cell_width + gap)
+        y = margin + (idx // cols) * (cell_height + gap)
+        dr.rounded_rectangle((x, y, x+cell_width-1, y+cell_height-1), radius=9,
+                             outline='#dddddd', width=2, fill='#ffffff')
+        dr.text((x+12, y+8), f'Amazon promotion {idx+1}', fill='#222222')
+        canvas.paste(im, (x + (cell_width-im.width)//2, y+34))
+    output = io.BytesIO()
+    canvas.save(output, 'JPEG', quality=85, optimize=True)
+    return output.getvalue()
+
+
+async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
+    """Validate every Amazon promotion independently; publish only valid unused ones.
+
+    Each destination receives one photo+caption. Dedup reservations are atomic and
+    committed only after successful send, so failed sends remain retryable.
+    """
+    urls = _multi_promo_links(resolved_text)
+    if len(urls) < 2:
+        return False
+    print(f'   🎟️ [MULTI PROMO] {len(urls)} distinct Amazon promotions detected', flush=True)
+    if uname in SOURCE_TARGETS:
+        channels = list(SOURCE_TARGETS[uname])
+    else:
+        channels = [HUNTER_CHANNEL]
+        if uname in HALA_ALLOWED_SOURCES:
+            channels.append(HALA_CHANNEL)
+    # Bounded to avoid overloaded Playwright/very large Telegram images.
+    urls = urls[:8]
+    confirmed = []
+    for index, url in enumerate(urls, 1):
+        key = _promo_dedup_id(url)
+        print(f'   🔎 [MULTI PROMO] {index}/{len(urls)} {key}: checking Amazon dates/brands/title', flush=True)
+        try:
+            shot, amazon_title, brands, status = await get_promo_info(url)
+            if status != 'active' or not shot or not brands or not amazon_title:
+                print(f'   ⛔ [MULTI PROMO] {key} excluded (status={status}, photo={bool(shot)}, brands={bool(brands)}, title={bool(amazon_title)})', flush=True)
+                continue
+            title = await asyncio.to_thread(_arabic_promo_heading, amazon_title)
+            if not title:
+                print(f'   ⛔ [MULTI PROMO] {key} excluded: failed Arabic Amazon heading', flush=True)
+                continue
+            confirmed.append({'key': key, 'url': url, 'title': title, 'shot': shot, 'brands': brands})
+        except Exception as exc:
+            print(f'   ⚠️ [MULTI PROMO] {key}: {type(exc).__name__}: {str(exc)[:120]}', flush=True)
+    if not confirmed:
+        print('   ⛔ [MULTI PROMO] no independently confirmed active promotions — no send', flush=True)
+        return True
+    hunter_sent_text = None
+    hunter_sent_shot = None
+    for chan in channels:
+        # Atomically reserve only validated & not-recently-posted promotion IDs.
+        reserved = []
+        async with _RESERVE_LOCK:
+            latest = load_sent_today()
+            for item in confirmed:
+                k = f"{item['key']}:{chan}"
+                if k not in latest:
+                    latest[k] = _now_ts()
+                    reserved.append((item, k))
+            if reserved:
+                save_sent_today(latest)
+        if not reserved:
+            print(f'   🔁 [MULTI PROMO] {chan}: all confirmed offers previously sent', flush=True)
+            continue
+        selected = [item for item, _ in reserved]
+        try:
+            tag = CHANNEL_TAG_OVERRIDE.get(chan, SOURCE_TAGS.get(uname)) or 'burmito-21'
+            sections = []
+            for i, item in enumerate(selected, 1):
+                new_url, _ = retag(item['url'], tag)
+                if not new_url or not _amazon_host(new_url):
+                    raise ValueError('Amazon promotion retagging failed')
+                # Amazon title and offer terms ONLY; nothing copied from source caption.
+                sections.append(f"🎁 {i}. {item['title']}\n🔗 {new_url}")
+            caption = '\n\n'.join(sections)
+            footer_allowance = 65 if chan == HUNTER_CHANNEL else 0
+            if len(caption) + footer_allowance > 1024:
+                caption = '\n'.join(f"{i}. {it['title']} — {retag(it['url'], tag)[0]}" for i, it in enumerate(selected, 1))
+            if len(caption) + footer_allowance > 1024:
+                raise ValueError('Multiple promotion titles and links exceed Telegram photo caption limit')
+            combined = await asyncio.to_thread(_compose_promo_screenshots, [x['shot'] for x in selected])
+            framed = add_frame(combined, tag)
+            publish_caption, publish_mode = _hunter_post_text(caption, chan, None, caption=True)
+            import io
+            media = io.BytesIO(framed)
+            media.name = 'amazon_promotions.jpg'
+            await client.send_file(chan, media, caption=publish_caption, parse_mode=publish_mode,
+                                   force_document=False)
+            print(f'   ✅ [MULTI PROMO] sent {len(selected)} confirmed offers as ONE post to {chan}', flush=True)
+            if chan == HUNTER_CHANNEL:
+                hunter_sent_text, hunter_sent_shot = caption, combined
+        except Exception as exc:
+            print(f'   ❌ [MULTI PROMO] {chan} send/combine failed: {type(exc).__name__}: {str(exc)[:160]}', flush=True)
+            async with _RESERVE_LOCK:
+                latest = load_sent_today()
+                for _, k in reserved:
+                    latest.pop(k, None)
+                save_sent_today(latest)
+    # Preserve existing Hunter→Melook/Hala round-robin, using exactly the
+    # same verified combined content/image without scraping again.
+    if hunter_sent_text and MIRROR_HUNTER_TO_MELOOK:
+        await _mirror_to_melook_hala(hunter_sent_text, hunter_sent_shot, msg)
+    return True
+
+
 async def _send_promo_post(client, uname, src_name, promo_text, first_promo_url, msg, n_promo=1):
     """يبعت بوست بروموشنز.
        - بروموشن واحد: عنوان (عرض على..) + سكرين شوت للصفحة
@@ -2768,6 +2920,11 @@ async def handler(event):
         is_all_promo = False
         first_promo_url = None
         n_promo = 0
+        # A multi-promotion message is always processed as ONE verified Amazon collage,
+        # regardless of originating channel. Never take titles from source messages.
+        if not asin and len(_multi_promo_links(new_text)) >= 2:
+            await _send_multi_promo_post(client, uname, src_name, new_text, msg)
+            return
         if uname == "elwyy" and not asin:   # Existing special multi-promotion handling for Elwyy
             for u in LINK_RE.findall(text):
                 if _public_http_url(u):
