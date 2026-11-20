@@ -2672,7 +2672,9 @@ def _compose_promo_screenshots(shots):
 async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
     """Validate every Amazon promotion independently; publish only valid unused ones.
 
-    Each destination receives one photo+caption. Dedup reservations are atomic and
+    Each destination receives one Amazon screenshot (first eligible promotion)
+    plus unnumbered headings/brand names/links for all eligible promotions.
+    Dedup reservations are atomic and
     committed only after successful send, so failed sends remain retryable.
     """
     urls = _multi_promo_links(resolved_text)
@@ -2727,15 +2729,14 @@ async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
         try:
             tag = CHANNEL_TAG_OVERRIDE.get(chan, SOURCE_TAGS.get(uname)) or 'burmito-21'
             sections = []
-            for i, item in enumerate(selected, 1):
+            for item in selected:
                 new_url, _ = retag(item['url'], tag)
                 if not new_url or not _amazon_host(new_url):
                     raise ValueError('Amazon promotion retagging failed')
-                # Amazon title and offer terms ONLY; nothing copied from source caption.
-                # Restore sidebar product/brand names in the DESCRIPTION,
-                # not just the screenshot. The title still comes from Amazon.
+                # Verified Amazon title and sidebar brand names, no source-caption text.
+                # Never number the offers or add generated image labels.
                 brand_phrase = _promo_brands_caption(item['brands'])
-                sections.append(f"🎁 {i}. {item['title']}{brand_phrase}\n🔗 {new_url}")
+                sections.append(f"🎁 {item['title']}{brand_phrase}\n🔗 {new_url}")
             caption = '\n\n'.join(sections)
             footer_allowance = 65 if chan == HUNTER_CHANNEL else 0
             if len(caption) + footer_allowance > 1024:
@@ -2743,25 +2744,31 @@ async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
                 # URLs. At least one verified Amazon brand remains per offer.
                 for brand_limit in (3, 2, 1):
                     shorter = []
-                    for i, item in enumerate(selected, 1):
+                    for item in selected:
                         link, _ = retag(item['url'], tag)
-                        shorter.append(f"🎁 {i}. {item['title']}{_promo_brands_caption(item['brands'], brand_limit)}\n🔗 {link}")
+                        shorter.append(f"🎁 {item['title']}{_promo_brands_caption(item['brands'], brand_limit)}\n🔗 {link}")
                     caption = '\n\n'.join(shorter)
                     if len(caption) + footer_allowance <= 1024:
                         break
             if len(caption) + footer_allowance > 1024:
                 raise ValueError('Multiple promotions with Amazon sidebar brands exceed Telegram photo caption limit')
-            combined = await asyncio.to_thread(_compose_promo_screenshots, [x['shot'] for x in selected])
-            framed = add_frame(combined, tag)
+            # Use ONLY the first eligible offer's actual Amazon product screenshot.
+            # Remaining eligible offers appear as Arabic Amazon titles + links in caption.
+            first_shot = selected[0]['shot']
+            framed = add_frame(first_shot, tag)
             publish_caption, publish_mode = _hunter_post_text(caption, chan, None, caption=True)
+            import html as _html
+            visible_caption = _html.unescape(re.sub(r'<[^>]+>', '', publish_caption))
+            if len(visible_caption) > 1024:
+                raise ValueError('Promotion caption exceeds 1024 Telegram characters')
             import io
             media = io.BytesIO(framed)
-            media.name = 'amazon_promotions.jpg'
+            media.name = 'amazon_promotion.jpg'
             await client.send_file(chan, media, caption=publish_caption, parse_mode=publish_mode,
                                    force_document=False)
-            print(f'   ✅ [MULTI PROMO] sent {len(selected)} confirmed offers as ONE post to {chan}', flush=True)
+            print(f'   ✅ [MULTI PROMO] sent {len(selected)} confirmed offers as ONE post (first Amazon screenshot only) to {chan}', flush=True)
             if chan == HUNTER_CHANNEL:
-                hunter_sent_text, hunter_sent_shot = caption, combined
+                hunter_sent_text, hunter_sent_shot = caption, first_shot
         except Exception as exc:
             print(f'   ❌ [MULTI PROMO] {chan} send/combine failed: {type(exc).__name__}: {str(exc)[:160]}', flush=True)
             async with _RESERVE_LOCK:
@@ -2769,8 +2776,7 @@ async def _send_multi_promo_post(client, uname, src_name, resolved_text, msg):
                 for _, k in reserved:
                     latest.pop(k, None)
                 save_sent_today(latest)
-    # Preserve existing Hunter→Melook/Hala round-robin, using exactly the
-    # same verified combined content/image without scraping again.
+    # Preserve Hunter→Melook/Hala round-robin with the first verified shot.
     if hunter_sent_text and MIRROR_HUNTER_TO_MELOOK:
         await _mirror_to_melook_hala(hunter_sent_text, hunter_sent_shot, msg)
     return True
